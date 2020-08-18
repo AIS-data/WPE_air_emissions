@@ -1,0 +1,225 @@
+
+import geomesa_pyspark
+from pyspark.sql import SparkSession
+
+conf = geomesa_pyspark.configure(
+    jars=['/usr/lib/spark/jars/geomesa-hbase-spark-runtime_2.11-2.1.0-m.2.jar'],
+    packages=['geomesa_pyspark','pytz'],
+    spark_home='/usr/lib/spark/').\
+    setAppName('MyTestApp')
+
+conf.get('spark.master')
+
+
+spark = ( SparkSession
+    .builder
+    .config(conf=conf)
+    .getOrCreate()
+)
+
+import pyspark.sql.functions as F
+
+params = {
+    "hbase.zookeepers": "hbase.optix-ons-local:xxxx",
+    "hbase.catalog": "xxx-historical"
+}
+
+
+feature = "ee" 
+aisee = ( spark
+    .read
+    .format("geomesa")
+    .options(**params)
+    .option("geomesa.feature", feature)
+    .load()
+)
+
+aisee.createOrReplaceTempView("aisee")
+
+spark.sql("show tables").show()
+
+##read MMSI from file https://supergloo.com/spark-sql/spark-sql-csv-examples-python/
+df = spark.read.csv("s3://optix.ons.jupyter/jupyter/xxxx/xxxx.csv", inferSchema = True, header = True)
+df.registerTempTable("ships")
+distinct_ships = spark.sql("select distinct mmsi from ships")
+distinct_ships.createOrReplaceTempView("ships2")
+
+query_ee = spark.sql("""
+SELECT a.mmsi 
+     , dtg
+     , sog
+     , cog
+     , position as geom
+     , latitude
+     , longitude
+     , lag(cog, 1) over (order by a.mmsi, dtg) as cog_prev
+ 
+     , date_format(dtg, "YYYY-MM-dd") as day
+     , lag(date_format(dtg, "YYYY-MM-dd"), 1) over (order by a.mmsi, dtg) as day_prev
+     , lag(date_format(dtg, "YYYY-MM-dd"), -1) over (order by a.mmsi, dtg) as day_next
+   
+
+FROM aisee a
+RIGHT JOIN ships2 d on a.mmsi = d.mmsi
+WHERE
+    dtg > cast('2020-05-21 00' as timestamp)
+    and dtg < cast('2020-11-05 24' as timestamp)
+
+""")
+
+query_ee.show()
+query_ee.createOrReplaceTempView("filter_cog")
+
+query_result2 = spark.sql("""
+SELECT mmsi
+     , dtg
+     , sog
+     , cog
+     , latitude
+     , longitude
+     , geom
+     , cog_prev
+    , day
+    , day_prev
+    , day_next
+
+from filter_cog 
+where 
+    (cog_prev != cog OR cog_prev is null) OR (day != day_prev OR day_prev is null) OR (day != day_next OR day_next is null) 
+
+""")
+    
+query_result2.show()
+
+query_result2.createOrReplaceTempView("distprev")
+
+
+
+query_result3 = spark.sql("""
+select mmsi
+    , dtg
+    , geom
+    , lag(geom, 1) over (order by mmsi, dtg) as geom_prev
+    , lag(geom, -1) over (order by mmsi, dtg) as geom_next
+    , lag(dtg, 1) over (order by mmsi, dtg) as date_prev
+    , lag(dtg, -1) over (order by mmsi, dtg) as date_next
+    
+from distprev 
+
+""")
+query_result3.show()    
+
+query_result3.createOrReplaceTempView("dist")
+
+query_result4 = spark.sql("""
+select mmsi
+    , dtg
+    , geom
+    , geom_prev
+    , st_distanceSphere(geom, geom_prev)/1000 as distance_prevSphere
+    , st_distanceSphere(geom, geom_next)/1000 as distance_nextSphere
+    , unix_timestamp(dtg) as sec_cur
+    , unix_timestamp(date_prev) as sec_prev
+    , unix_timestamp(date_next) as sec_next
+    , lag(mmsi, 1) over (order by mmsi, dtg) as mmsi_prev
+
+from dist 
+
+""")
+query_result4.show()
+query_result4.createOrReplaceTempView("time_diff")
+
+
+query_result5 = spark.sql("""
+select mmsi
+    , dtg
+    , geom
+    , distance_prevSphere as d1
+    , sec_prev 
+    , sec_next
+    , sec_cur-sec_prev
+    , distance_nextSphere as d2
+    , sec_next-sec_cur
+    , distance_prevSphere/(sec_cur-sec_prev) as t1
+    , distance_nextSphere/(sec_next-sec_cur) as t2
+    , mmsi_prev
+    
+from time_diff 
+where 
+    (mmsi = mmsi_prev OR mmsi_prev is null)
+    AND (
+        ((distance_prevSphere/(sec_cur-sec_prev)) <=0.01 OR (distance_nextSphere/(sec_next-sec_cur)) <=0.01) 
+        OR sec_prev is null 
+        OR sec_next is null)
+""")
+query_result5.show()
+query_result5.createOrReplaceTempView("dist_filter")
+
+#assumption max speed = 20 knots * (1,852km/u)= 37,04 / (60*60) = 0,01
+
+query_result6 = spark.sql("""
+select mmsi
+    , dtg
+    , geom
+    , lag(geom, 1) over (order by mmsi, dtg) as geom2_prev
+    , lag(geom, -1) over (order by mmsi, dtg) as geom2_next
+    , lag(mmsi, 1) over (order by mmsi, dtg) as mmsi_prev
+    
+from dist_filter 
+
+""")
+query_result6.show()
+query_result6.createOrReplaceTempView("geom_new")
+
+query_result7 = spark.sql("""
+select mmsi
+    , dtg
+    , st_distanceSphere(geom, geom2_prev)/1000 as distance2_prevSphere
+    
+from geom_new 
+
+where 
+    mmsi = mmsi_prev
+
+""")
+query_result7.show()
+query_result7.createOrReplaceTempView("dist_new")
+
+query_result7 = spark.sql("""
+SELECT mmsi, sum(distance_prevSphere) as totale_afstand_km
+FROM (select mmsi
+    , geom
+    , geom2_prev
+    , st_distanceSphere(geom, geom2_prev)/1000 as distance_prevSphere
+
+from geom_new
+where 
+    mmsi = mmsi_prev)
+    
+group by
+        mmsi
+""")
+
+query_result7.show()
+
+
+query_result7 = spark.sql("""
+SELECT mmsi, date_format(dtg_sub, "YYYY-MM-dd") as day, sum(distance_prevSphere) as totale_afstand_km
+FROM (select mmsi
+    , geom
+    , geom2_prev
+    , st_distanceSphere(geom, geom2_prev)/1000 as distance_prevSphere
+    , date_sub(dtg, 0) as dtg_sub
+
+from geom_new
+where 
+    mmsi = mmsi_prev)
+group by
+        dtg_sub
+        , mmsi
+""")
+
+query_result7.show()
+
+
+query_result7.repartition(1).write.csv("s3://optix.ons.jupyter/jupyter/xxxx/xxxx.csv")
