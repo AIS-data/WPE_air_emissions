@@ -1,0 +1,81 @@
+… R code matching operations with package stringdist
+######### Matching OPERATOR’s names with ABR for one year ################## 
+# with use of   package StringDist
+###########################################################################
+
+Nruw<-readWorkbook("./Br_Gefilterd_Zeevaart2014_2017_v3.xlsx", sheet = 1) #List of ships
+ruw<- subset(Nruw, Jaar == 2017 )
+
+abr <- read_xlsx("BR_wceg_abr_nace50_2017.xlsx", sheet = 1) #General Business register NACE 50
+abr <- subset(abr, Jaar == 2017)
+
+# Basic cleaning actions
+te_matchen <- ruw$Operator.From.Current.File
+te_matchen <- tolower(te_matchen)
+te_matchen <- gsub("[[:punct:]]","",te_matchen)
+te_matchen <- trimws(te_matchen)
+
+abr_lookup <- abr$JuridischeNaam
+abr_lookup <- tolower(abr_lookup)
+abr_lookup <- gsub("[[:punct:]]","",abr_lookup)
+abr_lookup <- trimws(abr_lookup)
+
+
+# Remove ‘stop’words
+weghalen <- c(
+   "marine contractors?"
+   , "shipping"
+   , "scheepvaart"
+   , "rederij"
+   , "scheepvaartonderneming"
+   , "services"
+   , "tankers?"
+   , " vof"
+   , "vof"
+   , "koninklijke"
+   , "company"
+   ," bv"
+   ," cv"
+   ," co"
+   ," holding"
+   ," groep"
+   ," shipmanagement"
+   ," navigation"
+   ," offshore"
+   ," chartering"
+   ," international"
+   ," ltd"
+   ," ship management"
+   ," baggermaatschappij"
+   ," transport"
+   ," nv")
+for (word in weghalen){
+   te_matchen <- gsub(word,"",te_matchen)
+   abr_lookup <- gsub(word,"", abr_lookup)
+}
+
+te_matchen <- trimws(te_matchen)
+abr_lookup <- trimws(abr_lookup)
+te_matchen <- gsub(" +"," ",te_matchen)
+abr_lookup <- gsub(" +"," ",abr_lookup)
+
+i <- amatch(te_matchen, abr_lookup, method="jw",p=0.1, maxDist=0.1) #see package stringdist info or all methods
+
+# check results
+out <- data.frame(
+   ruw = ruw$Operator.From.Current.File
+   , ruw_cleaned=te_matchen
+   , abr_cleaned=abr_lookup[i]
+   , abr$JuridischeNaam[i]
+)
+
+#Write to file- checkresults
+filenaam<-paste("./outJN2017.xlsx", sep='')
+write.xlsx(out, filenaam)
+
+# Write to file - Results total
+resultaatJN <- cbind(ruw, abr[i,])
+filenaamRes<-paste("./resultJN2017.xlsx", sep='')
+write.xlsx(resultaatJN, filenaamRes)
+
+citation("stringdist")
