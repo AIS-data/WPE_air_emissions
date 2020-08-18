@@ -1,0 +1,65 @@
+
+import geomesa_pyspark
+from pyspark.sql import SparkSession
+
+conf = geomesa_pyspark.configure(
+    jars=['/usr/lib/spark/jars/geomesa-hbase-spark-runtime_2.11-2.1.0-m.2.jar'],
+    packages=['geomesa_pyspark','pytz'],
+    spark_home='/usr/lib/spark/').\
+    setAppName('MyTestApp')
+
+conf.get('spark.master')
+
+
+spark = ( SparkSession
+    .builder
+    .config(conf=conf)
+    .getOrCreate()
+)
+
+import pyspark.sql.functions as F
+
+params = {
+    "hbase.zookeepers": "hbase.optix-ons-local:xxxxx",
+    "hbase.catalog": "xxx-historical"
+}
+
+feature = "ee" ###"orbcomm" # or "ee", or "adsbx"
+aisee = ( spark
+    .read
+    .format("geomesa")
+    .options(**params)
+    .option("geomesa.feature", feature)
+    .load()
+)
+
+aisee.createOrReplaceTempView("aisee")
+
+
+spark.sql("show tables").show()
+
+df = spark.read.csv("s3://optix.ons.jupyter/jupyter/xxxx/xxxx.csv", inferSchema = True, header = True)
+df.registerTempTable("ships")
+imo_ships = spark.sql("select distinct imo from ships")
+imo_ships.createOrReplaceTempView("ships2")
+
+query_ee_shipid = spark.sql("""
+SELECT mmsi, a.imo, count(a.imo)
+
+FROM aisee a
+
+RIGHT JOIN ships2 d on a.imo = d.imo
+
+WHERE
+    dtg > cast('2020-02-01 00:00' as timestamp)
+    and dtg < cast('2020-02-01 19:01' as timestamp)
+    
+group by
+    mmsi
+    , a.imo
+
+""")
+
+query_ee_shipid.show()
+
+query_ee_shipid.repartition(1).write.csv("s3://optix.ons.jupyter/jupyter/xxx/xxx_mmsi_imo.csv")
